@@ -1,0 +1,6 @@
+-I/opt/pvsneslib/include
+-I/opt/devkitsnes/include
+-Isrc
+-I../build/snes/generated-ep1
+-DCHOCOLATE_KEEN_TARGET_SNES=1
+-DCHOCOLATE_KEEN_CONFIG_SPECIFIC_EPISODE=1

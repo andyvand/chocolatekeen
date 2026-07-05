@@ -102,6 +102,32 @@ Build steps:
 1. DEVKITPRO=/path/to/devkitpro DEVKITARM=/path/to/devkitpro/devkitarm make EPISODE=X (X = 1, 2 or 3).
 2. Now you have a .gba ROM. You can flash this to a GBA cartridge or run in an emulator (VisualBoyAdvance-m and mGBA are tested).
 
+### Super Nintendo (PVSnesLib / devkitsnes)
+The repository includes a native SNES port in `snes/`. Unlike the other targets it does not run
+the engine against a software framebuffer (impossible on SNES hardware): the game logic is
+transcribed to run against the SNES PPU directly — BG tilemaps, OAM metasprites, an SPC700
+driver that plays the original PC-speaker effects — with all game data converted at build time
+by host tools in `scripts/`.
+
+Prerequisites:
+1. Install PVSnesLib 4.5+ so that `devkitsnes/` and `pvsneslib/` live under one root
+   (default expected root: `/opt`, override with `PVSNESLIB_HOME`).
+2. A host C compiler (`cc`) for the asset-conversion tools.
+3. Original Keen 1-3 game data in `data/GAMEDATA/KEEN<n>` (same layout the desktop build uses).
+
+Build steps:
+1. `make -C snes EPISODE=X bake` (X = 1, 2 or 3) — converts graphics/levels/sounds/texts into
+   `build/snes/generated-ep<X>/`.
+2. `make -C snes EPISODE=X` — produces `snes/chocolate-keen-snes-ep<X>.sfc` (1 MB HiROM+FastROM,
+   8 KB battery SRAM for saves).
+3. Run in an SNES emulator (snes9x and bsnes cores tested) or flash to a HiROM flashcart.
+
+Controls: d-pad move, B jump, Y pogo, X fire (or B+Y), Start status box (in a level) or the
+save-slot picker (on the world map), menus with d-pad + B.
+
+Developer notes: the `.variant` stamp forces a clean object rebuild when `EPISODE` changes —
+do not build two episodes concurrently (they share object paths).
+
 ### PlayStation Vita (VitaSDK)
 The repository includes a VitaSDK target in `build/vita`. It builds a `.vpk` that packages the executable and bundled Episode One `GAMEDATA`.
 
