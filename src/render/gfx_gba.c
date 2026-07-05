@@ -17,6 +17,7 @@
  */
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -92,125 +93,94 @@ void (*CVort_engine_gui_drawRoundedRectBorder_ptr)(int, int, int, int, int, int,
  * downscale (3/4 horizontal, 4/5 vertical). Everything is visible,
  * no letterbox bars, and the aspect ratio is squished by ~6%
  * (320/200 = 1.60 source vs 240/160 = 1.50 LCD) — negligible for
- * game art. A precomputed dest→src LUT keeps the inner loop a pair
- * of byte loads per halfword written; the sample tables live in
- * EWRAM .sbss so they're initialised once. */
+ * game art. Source columns/rows dropped by the downscale are
+ * max-merged into their kept neighbour so 1-pixel font strokes on
+ * the dropped lanes don't vanish. */
 #define GBA_LCD_WIDTH       240
 #define GBA_LCD_HEIGHT      160
 #define SRC_VISIBLE_WIDTH   ENGINE_EGA_GFX_WIDTH     /* 320 */
 #define SRC_VISIBLE_HEIGHT  ENGINE_EGA_GFX_HEIGHT    /* 200 */
 
+#if SRC_VISIBLE_WIDTH != 320 || SRC_VISIBLE_HEIGHT != 200 \
+    || (ENGINE_EGA_GFX_SCANLINE_LEN & 3)
+#error "gba_blitScaledFrame hard-codes a 320x200 source with word-aligned stride"
+#endif
+
+/* The blit reads byteEgaMemory as 32-bit words; both page starts
+ * (0 and 0x3000) and the stride (384) are word multiples, so only the
+ * array's own offset inside engine_screen needs checking. */
+_Static_assert((offsetof(CVort_engine_screen_T, client.byteEgaMemory) & 3) == 0,
+               "byteEgaMemory must be word-aligned for the GBA blit");
+
 static bool g_gbaModeInitialised = false;
 
-/* Scale LUTs live in .bss (IWRAM, 32-bit bus, 0 wait states) — not .sbss
- * (EWRAM, 16-bit bus, wait states). The inner blit loop reads these
- * every pixel, so this alone removes several cycles per dest pixel. */
-static uint16_t s_gbaSrcX[GBA_LCD_WIDTH];
-static uint16_t s_gbaSrcY[GBA_LCD_HEIGHT];
-/* Tap > 1 marks a destination column/row that must also sample its +1
- * source neighbour (via max-merge) so a source column/row that would
- * otherwise be dropped by the downscale still contributes. Without
- * this, 1-pixel font strokes on the dropped lanes vanish entirely. */
-static uint8_t  s_gbaTapX[GBA_LCD_WIDTH];
-static uint8_t  s_gbaTapY[GBA_LCD_HEIGHT];
-static bool     s_gbaScaleLutReady;
-
-/* Per-row destination halfwords, built once from the X LUTs. Each entry
- * encodes how a single dest halfword (two dest pixels) samples the source
- * line: srcOff is the byte offset into srcLine for the first pixel, and
- * flags packs the +1 tap bits for pixel 0 / pixel 1. This lets the inner
- * blit loop stay in IWRAM without any branchy per-column decoding. */
-typedef struct {
-    uint16_t sx0;     /* srcLine byte offset for destination pixel 0 */
-    uint16_t sx1;     /* srcLine byte offset for destination pixel 1 */
-    uint8_t  tap0;    /* 1 or 2 — merge sx0+1 into p0 if >1 */
-    uint8_t  tap1;    /* 1 or 2 — merge sx1+1 into p1 if >1 */
-} gba_scale_col_t;
-static gba_scale_col_t s_gbaColPairs[GBA_LCD_WIDTH / 2];
-
-static void gba_buildScaleLut(void) {
-    if (s_gbaScaleLutReady) return;
-    for (int x = 0; x < GBA_LCD_WIDTH; x++) {
-        s_gbaSrcX[x] = (uint16_t)((x * SRC_VISIBLE_WIDTH) / GBA_LCD_WIDTH);
-    }
-    for (int x = 0; x < GBA_LCD_WIDTH; x++) {
-        uint16_t next = (x + 1 < GBA_LCD_WIDTH) ? s_gbaSrcX[x + 1]
-                                                : (uint16_t)SRC_VISIBLE_WIDTH;
-        s_gbaTapX[x] = (uint8_t)((next - s_gbaSrcX[x] > 1) ? 2 : 1);
-    }
-    for (int y = 0; y < GBA_LCD_HEIGHT; y++) {
-        s_gbaSrcY[y] = (uint16_t)((y * SRC_VISIBLE_HEIGHT) / GBA_LCD_HEIGHT);
-    }
-    for (int y = 0; y < GBA_LCD_HEIGHT; y++) {
-        uint16_t next = (y + 1 < GBA_LCD_HEIGHT) ? s_gbaSrcY[y + 1]
-                                                 : (uint16_t)SRC_VISIBLE_HEIGHT;
-        s_gbaTapY[y] = (uint8_t)((next - s_gbaSrcY[y] > 1) ? 2 : 1);
-    }
-    for (int x = 0; x < GBA_LCD_WIDTH; x += 2) {
-        s_gbaColPairs[x >> 1].sx0  = s_gbaSrcX[x];
-        s_gbaColPairs[x >> 1].sx1  = s_gbaSrcX[x + 1];
-        s_gbaColPairs[x >> 1].tap0 = s_gbaTapX[x];
-        s_gbaColPairs[x >> 1].tap1 = s_gbaTapX[x + 1];
-    }
-    s_gbaScaleLutReady = true;
-}
-
-/* Hot per-frame blit. Placed in IWRAM so instruction fetches are 0-wait
- * 32-bit instead of ROM's 16-bit wait-stated fetches — roughly a 3× win
- * on instruction throughput alone. The inner loop still reads source
- * bytes from EWRAM (byteEgaMemory is too big for IWRAM), but the LUT
- * references (s_gbaColPairs) resolve to IWRAM now. */
-__attribute__((section(".iwram"), long_call, noinline))
+/* Hot per-frame blit, specialised for the fixed 320x200 -> 240x160
+ * downscale. Runs as ARM code from IWRAM: instruction fetches are 0-wait
+ * 32-bit instead of ROM's wait-stated 16-bit ones.
+ *
+ * Horizontally, every 4 source pixels produce 3 destination pixels
+ * (source px 3 max-merges into dest px 2). Reading the source as two
+ * aligned words per 8 pixels halves the EWRAM bus traffic versus
+ * per-byte loads (one 32-bit EWRAM read costs 6 cycles vs 4x3 for
+ * bytes). Vertically, every 5 source rows produce 4 destination rows;
+ * the dropped row (phase y%4 == 3) max-merges into the row above it. */
+IWRAM_CODE ARM_CODE __attribute__((noinline))
 static void gba_blitScaledFrame(const uint8_t *srcBase, uint16_t *dst) {
+    int sy = 0;
     for (int y = 0; y < GBA_LCD_HEIGHT; y++) {
-        uint16_t sy = s_gbaSrcY[y];
-        const uint8_t *srcLine0 = srcBase + sy * ENGINE_EGA_GFX_SCANLINE_LEN;
-        const uint8_t *srcLine1 = (s_gbaTapY[y] > 1)
-            ? srcBase + (sy + 1) * ENGINE_EGA_GFX_SCANLINE_LEN
-            : srcLine0;
-        const gba_scale_col_t *cols = s_gbaColPairs;
-        if (srcLine1 == srcLine0) {
-            /* Fast path — no vertical neighbour merge. */
-            for (int i = 0; i < GBA_LCD_WIDTH / 2; i++) {
-                uint16_t sx0 = cols[i].sx0;
-                uint16_t sx1 = cols[i].sx1;
-                uint8_t p0 = srcLine0[sx0];
-                uint8_t p1 = srcLine0[sx1];
-                if (cols[i].tap0 > 1) {
-                    uint8_t m = srcLine0[sx0 + 1];
-                    if (m > p0) p0 = m;
-                }
-                if (cols[i].tap1 > 1) {
-                    uint8_t m = srcLine0[sx1 + 1];
-                    if (m > p1) p1 = m;
-                }
+        const uint32_t *s0 = (const uint32_t *)(srcBase
+                           + sy * ENGINE_EGA_GFX_SCANLINE_LEN);
+        if ((y & 3) != 3) {
+            /* Fast path — this dest row samples a single source row. */
+            for (int g = 0; g < GBA_LCD_WIDTH / 6; g++) {
+                uint32_t w0 = *s0++;
+                uint32_t w1 = *s0++;
+                uint32_t p0 =  w0        & 0xFF;
+                uint32_t p1 = (w0 >> 8)  & 0xFF;
+                uint32_t p2 = (w0 >> 16) & 0xFF;
+                uint32_t p3 =  w0 >> 24;
+                if (p3 > p2) p2 = p3;
+                uint32_t p4 =  w1        & 0xFF;
+                uint32_t p5 = (w1 >> 8)  & 0xFF;
+                uint32_t p6 = (w1 >> 16) & 0xFF;
+                uint32_t p7 =  w1 >> 24;
+                if (p7 > p6) p6 = p7;
                 *dst++ = (uint16_t)(p0 | (p1 << 8));
+                *dst++ = (uint16_t)(p2 | (p4 << 8));
+                *dst++ = (uint16_t)(p5 | (p6 << 8));
             }
+            sy += 1;
         } else {
-            /* Slow path — max-merge the dropped source row. */
-            for (int i = 0; i < GBA_LCD_WIDTH / 2; i++) {
-                uint16_t sx0 = cols[i].sx0;
-                uint16_t sx1 = cols[i].sx1;
-                uint8_t p0 = srcLine0[sx0];
-                uint8_t p1 = srcLine0[sx1];
-                uint8_t q0 = srcLine1[sx0];
-                uint8_t q1 = srcLine1[sx1];
-                if (cols[i].tap0 > 1) {
-                    uint8_t m = srcLine0[sx0 + 1];
-                    if (m > p0) p0 = m;
-                    m = srcLine1[sx0 + 1];
-                    if (m > q0) q0 = m;
-                }
-                if (cols[i].tap1 > 1) {
-                    uint8_t m = srcLine0[sx1 + 1];
-                    if (m > p1) p1 = m;
-                    m = srcLine1[sx1 + 1];
-                    if (m > q1) q1 = m;
-                }
-                if (q0 > p0) p0 = q0;
-                if (q1 > p1) p1 = q1;
+            /* Merge path — max-merge the dropped source row (sy+1). */
+            const uint32_t *s1 = (const uint32_t *)(srcBase
+                               + (sy + 1) * ENGINE_EGA_GFX_SCANLINE_LEN);
+            for (int g = 0; g < GBA_LCD_WIDTH / 6; g++) {
+                uint32_t w0 = *s0++;
+                uint32_t w1 = *s0++;
+                uint32_t v0 = *s1++;
+                uint32_t v1 = *s1++;
+                uint32_t p, q;
+#define GBA_LANE_MAX(dstv, wa, va, shift)                     \
+                p = ((wa) >> (shift)) & 0xFF;                 \
+                q = ((va) >> (shift)) & 0xFF;                 \
+                dstv = (q > p) ? q : p;
+                uint32_t p0, p1, p2, p3, p4, p5, p6, p7;
+                GBA_LANE_MAX(p0, w0, v0, 0)
+                GBA_LANE_MAX(p1, w0, v0, 8)
+                GBA_LANE_MAX(p2, w0, v0, 16)
+                GBA_LANE_MAX(p3, w0, v0, 24)
+                if (p3 > p2) p2 = p3;
+                GBA_LANE_MAX(p4, w1, v1, 0)
+                GBA_LANE_MAX(p5, w1, v1, 8)
+                GBA_LANE_MAX(p6, w1, v1, 16)
+                GBA_LANE_MAX(p7, w1, v1, 24)
+                if (p7 > p6) p6 = p7;
+#undef GBA_LANE_MAX
                 *dst++ = (uint16_t)(p0 | (p1 << 8));
+                *dst++ = (uint16_t)(p2 | (p4 << 8));
+                *dst++ = (uint16_t)(p5 | (p6 << 8));
             }
+            sy += 2;
         }
     }
 }
@@ -277,7 +247,7 @@ static uint16_t       g_gbaTileNum       = 0;
 #define GBA_TILE_CACHE_MASK  (GBA_TILE_CACHE_SLOTS - 1)
 #define GBA_TILE_EMPTY       0xFFFF
 static uint8_t  s_gbaTileCache[GBA_TILE_CACHE_SLOTS][256]
-    __attribute__((section(".sbss")));
+    __attribute__((section(".sbss"), aligned(4)));
 static uint16_t s_gbaTileCacheOwner[GBA_TILE_CACHE_SLOTS]
     __attribute__((section(".sbss")));
 static bool     s_gbaTileCacheInited
@@ -322,6 +292,75 @@ static const uint8_t *gba_decodeTile(uint16_t num) {
     }
     s_gbaTileCacheOwner[slot] = num;
     return dst;
+}
+
+/* --------------------------------------------------------------
+ * Adaptive-tile-refresh dirty-cell cache.
+ *
+ * adaptiveTileRefresh used to redraw the full 21x13 visible grid every
+ * frame — 273 tile blits (~70 KiB of EWRAM writes) even when nothing
+ * moved. Instead we remember, per framebuffer page and grid cell, which
+ * tile was last blitted there and skip cells that still hold it. The
+ * cache is keyed to the tile-aligned scroll origin: when the origin
+ * shifts (every 16 px of scroll) the page repaints in full, but static
+ * frames — most of gameplay, menus, the worldmap — reduce to blitting
+ * only animated tiles.
+ *
+ * Anything else that writes into byteEgaMemory (sprites, chars, bmps,
+ * draw_func overlays, full clears) must invalidate the cells it touches
+ * so the next refresh restores the map beneath it; see gba_atrMarkRect
+ * callers below.
+ * -------------------------------------------------------------- */
+#define GBA_ATR_COLS 21
+#define GBA_ATR_ROWS 13
+#define GBA_ATR_NONE 0xFFFF
+static uint16_t s_gbaAtrOwner[2][GBA_ATR_ROWS * GBA_ATR_COLS]
+    __attribute__((section(".sbss")));
+static int32_t  s_gbaAtrScrollX[2], s_gbaAtrScrollY[2];
+static bool     s_gbaAtrValid[2];
+
+static inline int gba_atrPage(void) { return engine_dstPage ? 1 : 0; }
+
+static void gba_atrInvalidateAll(void) {
+    s_gbaAtrValid[0] = false;
+    s_gbaAtrValid[1] = false;
+}
+
+/* Mark the grid cells covering pixel rect [px,px+w)x[py,py+h) of the
+ * current destination page as needing a repaint on the next refresh. */
+static void gba_atrMarkRect(int px, int py, int w, int h) {
+    const int page = gba_atrPage();
+    if (!s_gbaAtrValid[page]) return;
+    int tx0 = px >> 4;
+    int ty0 = py >> 4;
+    int tx1 = (px + w - 1) >> 4;
+    int ty1 = (py + h - 1) >> 4;
+    if (tx0 < 0) tx0 = 0;
+    if (ty0 < 0) ty0 = 0;
+    if (tx1 >= GBA_ATR_COLS) tx1 = GBA_ATR_COLS - 1;
+    if (ty1 >= GBA_ATR_ROWS) ty1 = GBA_ATR_ROWS - 1;
+    uint16_t *owner = s_gbaAtrOwner[page];
+    for (int ty = ty0; ty <= ty1; ty++) {
+        for (int tx = tx0; tx <= tx1; tx++) {
+            owner[ty * GBA_ATR_COLS + tx] = GBA_ATR_NONE;
+        }
+    }
+}
+
+/* 16-px-wide tile row blit as 4 word copies per row. Both sides are
+ * word-aligned: the tile cache slots are aligned(4), and dst offsets are
+ * page (0/0x3000) + py*384 + a multiple of 8. Word accesses halve the
+ * EWRAM bus traffic versus byte copies and skip memcpy call overhead. */
+IWRAM_CODE ARM_CODE __attribute__((noinline))
+static void gba_blitTile16(uint8_t *dst, const uint8_t *src, int h) {
+    for (int y = 0; y < h; y++) {
+        uint32_t *d = (uint32_t *)dst;
+        const uint32_t *s = (const uint32_t *)src;
+        uint32_t a = s[0], b = s[1], c = s[2], e = s[3];
+        d[0] = a; d[1] = b; d[2] = c; d[3] = e;
+        dst += ENGINE_EGA_GFX_SCANLINE_LEN;
+        src += 16;
+    }
 }
 
 /* Backing storage for the sprite/font pointer tables. The runtime fills
@@ -468,6 +507,7 @@ void CVort_engine_gui_clearScreen(void) {
      * scene. */
     memset(engine_screen.client.byteEgaMemory, 0,
            sizeof(engine_screen.client.byteEgaMemory));
+    gba_atrInvalidateAll();
     engine_isFrameReadyToDisplay = true;
 
     if (g_gbaModeInitialised) {
@@ -486,7 +526,6 @@ void CVort_engine_gui_drawColoredColumn(int columnNum, int columnLength, int col
 
 void CVort_engine_updateActualDisplay(void) {
     gba_ensureMode4();
-    gba_buildScaleLut();
 
     if (!engine_isFrameReadyToDisplay) return;
 
@@ -554,6 +593,7 @@ bool CVort_engine_setVideoMode(int16_t vidMode) {
     if (vidMode == CVORT_VIDEO_MODE_GRAPHICS) {
         memset(engine_screen.client.byteEgaMemory, 0,
                sizeof(engine_screen.client.byteEgaMemory));
+        gba_atrInvalidateAll();
     }
     engine_screen.client.currVidMode = vidMode;
     engine_isFrameReadyToDisplay = true;
@@ -604,6 +644,7 @@ void CVort_engine_drawChar(uint16_t x, uint16_t y, uint16_t val) {
         dst += ENGINE_EGA_GFX_SCANLINE_LEN;
         fontPixelPtr += 8;
     }
+    gba_atrMarkRect(px, py, 8, 8);
     engine_isFrameReadyToDisplay = true;
 }
 
@@ -643,26 +684,36 @@ void CVort_engine_drawSprite(uint16_t x, uint16_t y, uint16_t num) {
             dst[xx] = (uint8_t)((maskFill & dst[xx]) | (v & 0x0F));
         }
     }
+    gba_atrMarkRect(px, py, copyW, h);
 }
 
-void CVort_engine_drawTile(uint16_t x, uint16_t y, uint16_t num) {
-    /* Matches the SDL convention (gfx.c:2992): x is a byte-column (one
-     * byte = 8 pixels, one tile = 2 bytes = 16 pixels), y is a raw pixel
-     * row. The previous GBA version interpreted y as a tile row and
-     * caller-side divided x by 2, which squished the whole tile grid to
-     * half-width and left stale content on the right half of the
-     * framebuffer whenever a scene transitioned without a full clear. */
+/* Matches the SDL convention (gfx.c:2992): x is a byte-column (one
+ * byte = 8 pixels, one tile = 2 bytes = 16 pixels), y is a raw pixel
+ * row. Tiles overlapping the bottom edge are height-clipped. Returns
+ * true if any pixels were written. */
+static bool gba_drawTileCommon(uint16_t x, uint16_t y, uint16_t num) {
     const uint8_t *src = gba_decodeTile(num);
-    if (!src) return;
+    if (!src) return false;
     int px = (int)x * 8;
     int py = (int)y;
-    if (px < 0 || py < 0) return;
-    if (px + 16 > ENGINE_EGA_GFX_SCANLINE_LEN) return;
-    if (py + 16 > SRC_VISIBLE_HEIGHT) return;
+    if (px < 0 || py < 0) return false;
+    if (px + 16 > ENGINE_EGA_GFX_SCANLINE_LEN) return false;
+    int h = 16;
+    if (py + h > SRC_VISIBLE_HEIGHT) h = SRC_VISIBLE_HEIGHT - py;
+    if (h <= 0) return false;
     uint8_t *dst = engine_screen.client.byteEgaMemory
                  + engine_dstPage
                  + py * ENGINE_EGA_GFX_SCANLINE_LEN + px;
-    gba_blitIndexed8(dst, src, 16, 16, ENGINE_EGA_GFX_SCANLINE_LEN, 16);
+    gba_blitTile16(dst, src, h);
+    return true;
+}
+
+void CVort_engine_drawTile(uint16_t x, uint16_t y, uint16_t num) {
+    if (gba_drawTileCommon(x, y, num)) {
+        /* Queued tile draws (sprite-background restores) can land at
+         * sub-cell offsets; the touched cells must repaint next frame. */
+        gba_atrMarkRect((int)x * 8, (int)y, 16, 16);
+    }
 }
 
 void CVort_engine_drawBitmap(uint16_t x, uint16_t y, uint16_t num) {
@@ -714,6 +765,7 @@ void CVort_engine_drawBitmap(uint16_t x, uint16_t y, uint16_t num) {
             }
         }
     }
+    gba_atrMarkRect(px, py, clipPixels, h);
 }
 
 uint16_t CVort_engine_drawSpriteAt(int32_t pos_x, int32_t pos_y, uint16_t frame) {
@@ -857,6 +909,9 @@ void CVort_engine_doDrawing(void) {
     }
     if (draw_func) {
         (draw_func)();
+        /* draw_func (e.g. do_draw_mural) writes into byteEgaMemory
+         * without telling us where — repaint everything next frame. */
+        gba_atrInvalidateAll();
     }
     engine_isFrameReadyToDisplay = true;
 }
@@ -869,6 +924,9 @@ void CVort_engine_blitTile(uint16_t num, uint32_t firstPos) {
     uint8_t *dst = engine_screen.client.byteEgaMemory + firstPos;
     gba_blitIndexed8(dst, src, 16, 16,
                      ENGINE_EGA_GFX_SCANLINE_LEN, 16);
+    /* firstPos is a raw buffer offset; rather than reverse it into
+     * page/cell coordinates, repaint everything. Rare call. */
+    gba_atrInvalidateAll();
 }
 
 void CVort_engine_adaptiveTileRefresh(uint16_t initTileIndex) {
@@ -887,23 +945,44 @@ void CVort_engine_adaptiveTileRefresh(uint16_t initTileIndex) {
     const int32_t scrollYTile = (int32_t)((scroll_y & 0xFFFFFF) >> 12);
     /* 21x13 covers 336x208, which fully encloses the 320x200 visible
      * region plus one tile of slack for sub-tile scroll. */
-    const int tilesWide = 21;
-    const int tilesTall = 13;
     const uint16_t *animTable = anim_plane[anim_plane_i];
     const uint16_t tileCap = engine_egaHeadGeneral.tileNum;
-    for (int ty = 0; ty < tilesTall; ty++) {
+
+    /* Dirty-cell tracking: repaint the page in full when its scroll
+     * origin changed (or after an invalidation); otherwise only blit
+     * cells whose resolved tile differs from what's already there —
+     * animated tiles and cells trampled by sprites/text last frame. */
+    const int page = gba_atrPage();
+    uint16_t *owner = s_gbaAtrOwner[page];
+    if (!s_gbaAtrValid[page]
+        || s_gbaAtrScrollX[page] != scrollXTile
+        || s_gbaAtrScrollY[page] != scrollYTile) {
+        for (int i = 0; i < GBA_ATR_ROWS * GBA_ATR_COLS; i++) {
+            owner[i] = GBA_ATR_NONE;
+        }
+        s_gbaAtrScrollX[page] = scrollXTile;
+        s_gbaAtrScrollY[page] = scrollYTile;
+        s_gbaAtrValid[page] = true;
+    }
+
+    for (int ty = 0; ty < GBA_ATR_ROWS; ty++) {
         const int mapY = scrollYTile + ty;
         if (mapY < 0 || mapY >= map_height_tile) continue;
         const int rowBase = mapY * (int)map_width_tile;
-        for (int tx = 0; tx < tilesWide; tx++) {
+        uint16_t *ownerRow = owner + ty * GBA_ATR_COLS;
+        for (int tx = 0; tx < GBA_ATR_COLS; tx++) {
             const int mapX = scrollXTile + tx;
             if (mapX < 0 || mapX >= map_width_tile) continue;
             const uint16_t raw = (uint16_t)map_data_tiles[rowBase + mapX];
             if (raw >= tileCap) continue;
             const uint16_t animTile = animTable[raw];
+            if (ownerRow[tx] == animTile) continue;
             /* drawTile expects x in byte-columns (one tile = 2 bytes)
              * and y in raw pixel rows. */
-            CVort_engine_drawTile((uint16_t)(tx * 2), (uint16_t)(ty * 16), animTile);
+            if (gba_drawTileCommon((uint16_t)(tx * 2), (uint16_t)(ty * 16),
+                                   animTile)) {
+                ownerRow[tx] = animTile;
+            }
         }
     }
     engine_isFrameReadyToDisplay = true;

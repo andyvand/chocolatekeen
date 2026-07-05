@@ -66,6 +66,11 @@ void ck_text_init(void)
 
     bgSetGfxPtr(2, CK_BG3_CHR_VRAM);
     bgSetMapPtr(2, CK_BG3_MAP_VRAM, SC_32x32);
+    /* SNES BGs show line VOFS+1 on the top scanline: latch -1 so the
+     * text grid truly starts at screen y 0 and lines up with BG1 (whose
+     * camera latch already subtracts 1, render.c). The BG1 icon overlays
+     * in the status box / ship dialog rely on this exact alignment. */
+    bgSetScroll(2, 0, (u16)(-1) & 255);
 
     ck_text_clear();
     bgSetDisable(2);

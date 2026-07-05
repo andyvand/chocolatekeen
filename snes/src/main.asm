@@ -64,7 +64,7 @@ jsr.l ck_timer_init
 jsr.l ck_msprite_init
 jsr.l ck_input_init
 jsr.l ck_game_state_init
-pea.w 715
+pea.w 689
 lda.l TILEINFO_Anim + 0
 sta.b tcc__r0
 lda.l TILEINFO_Anim + 0 + 2

@@ -289,6 +289,24 @@ static int process_level(const char *inPath, int levelNum, const char *outdir) {
         for (uint16_t t = 0x4D; t <= 0x51; t++) set_add(t);
     }
 
+    /* Status-box / ship-dialog icon tiles (drawn as BG1 overlays by the
+     * SNES UI: ship parts, keycards, weapon, pogo/ankh). Every level can
+     * open the status box; level 80 shows the ep1 ship dialog. */
+    if (g_episode == 1) {
+        for (uint16_t t = 0x141; t <= 0x144; t++) set_add(t); /* parts missing */
+        for (uint16_t t = 0x1C0; t <= 0x1C3; t++) set_add(t); /* parts held    */
+        for (uint16_t t = 0x1A8; t <= 0x1AB; t++) set_add(t); /* keycards      */
+        set_add(0x19E);                                       /* raygun        */
+        set_add(0x19F);                                       /* pogo          */
+    } else if (g_episode == 2) {
+        for (uint16_t t = 0x1A8; t <= 0x1AB; t++) set_add(t); /* keycards      */
+        set_add(0x19E);                                       /* pistol        */
+    } else {
+        for (uint16_t t = 0xD9; t <= 0xDC; t++) set_add(t);   /* keycards      */
+        set_add(0xD6);                                        /* ankh          */
+        set_add(0xD8);                                        /* pistol        */
+    }
+
     /* Anim chain closure to a fixpoint. */
     for (;;) {
         int changed = 0;

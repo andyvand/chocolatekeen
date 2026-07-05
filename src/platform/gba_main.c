@@ -28,6 +28,17 @@ static void gba_installInterrupts(void) {
     irqEnable(IRQ_VBLANK);
 }
 
+static void gba_setFastRomTiming(void) {
+    /* The GBA boots with conservative cart timings: ROM WS0 4/2 cycles,
+     * prefetch off. Every commercial cart and flashcart supports 3/1 +
+     * prefetch (the canonical 0x4317 used by most retail games), and
+     * nearly all of this game's code and data fetch from ROM, so this is
+     * a large global speedup. Bits 0-1 = 3 keeps SRAM at 8 cycles, the
+     * safe value CK_SRAM_Init also enforces. */
+    volatile uint16_t *waitcnt = (volatile uint16_t *)0x04000204;
+    *waitcnt = 0x4317;
+}
+
 static void gba_populateDefaultArguments(void) {
     memset(&engine_arguments, 0, sizeof(engine_arguments));
     engine_arguments.fullWidth = 240;
@@ -68,6 +79,7 @@ static void gba_populateDefaultArguments(void) {
 
 int main(void) {
     gba_installInterrupts();
+    gba_setFastRomTiming();
     CK_SRAM_Init();
     gba_populateDefaultArguments();
     CVort_engine_parseCalculatedEngineArguments();

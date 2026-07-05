@@ -18,10 +18,10 @@ src/game/gameplay.obj
 src/game/ui.obj
 src/game/worldmap.obj
 src/game/gameflow.obj
-../build/snes/generated-ep3/snes_data_gen.obj
+../build/snes/generated-ep2/snes_data_gen.obj
 data.obj
 ram7f.obj
-../build/snes/generated-ep3/data_ep3.obj
+../build/snes/generated-ep2/data_ep2.obj
 /opt/pvsneslib/lib/HiROM_FastROM/crt0_snes.obj
 /opt/pvsneslib/lib/HiROM_FastROM/libc.obj
 /opt/pvsneslib/lib/HiROM_FastROM/libm.obj

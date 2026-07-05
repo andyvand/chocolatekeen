@@ -5,6 +5,7 @@
 #include "engine/render.h"
 #include "engine/msprite.h"
 #include "engine/save.h"
+#include "engine/levelload.h"
 #include "data_format.h"
 #include "snes_data_gen.h"
 
@@ -77,6 +78,11 @@ void ck_ui_titlescreen(void)
     setScreenOff();
     ck_msprite_begin();
     ck_msprite_end();            /* hide sprites */
+
+    /* BG palette 0: at cold boot nothing has written CGRAM 0..15 yet
+     * (ck_render_level_init only runs at level load), and power-on CGRAM
+     * is undefined — black on some emulators, garbage on others. */
+    dmaCopyCGram((u8 *)ck_pal_ega, 0, 32);
 
     /* Title chr into the BG1 char area, its 64x32 map into the BG1 map.
      * The next level load rebuilds both, so nothing to preserve. */
@@ -330,6 +336,78 @@ void ck_ui_text_viewer(const char *txt)
     ck_text_show(0);
 }
 
+/* ---- BG1 icon overlays -------------------------------------------------
+ * The status box and the ep1 ship dialog show real game tiles (ship
+ * parts, keycards) inside their text boxes, like the DOS pause menu
+ * (src/episodes/episode1.c CVort1_show_pause_menu). BG3 text sits above
+ * BG1, so the icon cells are punched transparent (glyph 0) and the tiles
+ * are poked into map_data_tiles, then shown by a forced-blank window
+ * refill. BG1 scroll is latched to the 16px grid while the dialog is up
+ * so a world tile aligns exactly with a 2x2 text-cell pair; gameplay is
+ * paused and the next flow frame re-latches the true camera scroll.
+ *
+ * A "slot" (c, r) is the world tile at (cam_tile + c, cam_tile + r),
+ * displayed exactly at text cells (2c, 2r)..(2c+1, 2r+1).
+ */
+
+#define UI_PATCH_TX 5            /* patch region: slots c 5..12, r 6..8 */
+#define UI_PATCH_TY 6
+#define UI_PATCH_W  8
+#define UI_PATCH_H  3
+static u16 s_patch[UI_PATCH_W * UI_PATCH_H];
+static u16 s_patchTx, s_patchTy;
+
+static void ui_patch_open(void)
+{
+    u16 c, r;
+    u16 *p = s_patch;
+    s_patchTx = (u16)((ck_cam_px >> 4) + UI_PATCH_TX);
+    s_patchTy = (u16)((ck_cam_py >> 4) + UI_PATCH_TY);
+    for (r = 0; r < UI_PATCH_H; r++)
+        for (c = 0; c < UI_PATCH_W; c++)
+            *p++ = map_data_tiles[ck_rowofs[s_patchTy + r] + s_patchTx + c];
+}
+
+/* Poke a game tile into overlay slot (c, r). Must lie in the patch. */
+static void ui_slot(u8 c, u8 r, u16 tile)
+{
+    map_data_tiles[ck_rowofs[(u16)((ck_cam_py >> 4) + r)]
+                   + (u16)((ck_cam_px >> 4) + c)] = tile;
+}
+
+/* Clear a text-cell rectangle to glyph 0 (transparent: BG1 shows). */
+static void ui_punch(u8 x, u8 y, u8 w, u8 h)
+{
+    u8 i, j;
+    for (j = 0; j < h; j++)
+        for (i = 0; i < w; i++)
+            ck_text_char((u8)(x + i), (u8)(y + j), 0, 0);
+}
+
+/* Repaint the BG1 window from the (poked) map and latch grid-aligned
+ * scroll for the dialog. */
+static void ui_bg1_refill(void)
+{
+    setScreenOff();
+    ck_render_level_init();
+    bgSetScroll(0, (u16)(ck_cam_px & 0x1F0),
+                (u16)(((ck_cam_py & 0xFFF0) - 1) & 255));
+    setScreenOn();
+}
+
+/* Restore the patched map region and repaint with true camera scroll. */
+static void ui_patch_close(void)
+{
+    u16 c, r;
+    const u16 *p = s_patch;
+    for (r = 0; r < UI_PATCH_H; r++)
+        for (c = 0; c < UI_PATCH_W; c++)
+            map_data_tiles[ck_rowofs[s_patchTy + r] + s_patchTx + c] = *p++;
+    setScreenOff();
+    ck_render_level_init();
+    setScreenOn();
+}
+
 /* ---- in-level status box ---------------------------------------------------- */
 
 void ck_ui_status_box(void)
@@ -338,53 +416,118 @@ void ck_ui_status_box(void)
     u8 i;
 
     ck_text_clear();
-    ck_text_box(3, 5, 26, 12, CK_TEXT_WHITE);
-    ck_text_string(11, 6, "STATUS BOX", CK_TEXT_RED);
+    ck_text_box(3, 2, 26, 20, CK_TEXT_WHITE);
+    ck_text_string(11, 3, "STATUS BOX", CK_TEXT_RED);
 
-    ck_text_string(5, 8, "SCORE", CK_TEXT_WHITE);
+    ck_text_string(5, 5, "SCORE", CK_TEXT_WHITE);
     ui_dec((u32)keen_gp.score, num, 9);
-    ck_text_string(18, 8, num, CK_TEXT_WHITE);
+    ck_text_string(17, 5, num, CK_TEXT_WHITE);
 
-    ck_text_string(5, 10, "KEENS LEFT", CK_TEXT_WHITE);
+    ck_text_string(5, 7, "KEENS LEFT", CK_TEXT_WHITE);
     ui_dec((u32)(u16)keen_gp.lives, num, 3);
-    ck_text_string(24, 10, num, CK_TEXT_WHITE);
+    ck_text_string(23, 7, num, CK_TEXT_WHITE);
 
-    ck_text_string(5, 12, "AMMO", CK_TEXT_WHITE);
+    ck_text_string(5, 9, "AMMO", CK_TEXT_WHITE);
     ui_dec((u32)keen_gp.ammo, num, 3);
-    ck_text_string(24, 12, num, CK_TEXT_WHITE);
+    ck_text_string(23, 9, num, CK_TEXT_WHITE);
 
-    /* keycards + per-episode extras as Y/N flags */
-    ck_text_string(5, 14, "KEYS", CK_TEXT_WHITE);
-    for (i = 0; i < 4; i++)
-        ck_text_char((u8)(12 + i), 14,
-                     (u8)(keen_gp.stuff[5 + i] ? '*' : '-'), CK_TEXT_RED);
+    /* keycards + per-episode extras as real game tiles on BG1: icon
+     * rows are slots r=6 (cells 12-13) and r=8 (cells 16-17); unused
+     * slots show the empty tile 0x8F. */
+    ck_text_string(5, 12, "KEYS", CK_TEXT_WHITE);
+    ui_punch(10, 12, 16, 2);
+
+    ui_patch_open();
+    for (i = 0; i < UI_PATCH_W; i++)
+        ui_slot((u8)(UI_PATCH_TX + i), 6, 0x8F);
+
 #if CHOCOLATE_KEEN_CONFIG_SPECIFIC_EPISODE == 1
-    ck_text_string(18, 14, "PARTS", CK_TEXT_WHITE);
-    ck_text_char(25, 14, (u8)(keen_gp.stuff[0] ? '*' : '-'), CK_TEXT_RED);
-    ck_text_char(26, 14, (u8)(keen_gp.stuff[1] ? '*' : '-'), CK_TEXT_RED);
-    ck_text_char(27, 14, (u8)(keen_gp.stuff[2] ? '*' : '-'), CK_TEXT_RED);
-    ck_text_char(28, 14, (u8)(keen_gp.stuff[4] ? '*' : '-'), CK_TEXT_RED);
+    for (i = 0; i < 4; i++)
+        if (keen_gp.stuff[5 + i])
+            ui_slot((u8)(6 + (i << 1)), 6, (u16)(0x1A8 + i));
+
+    /* ship parts, DOS order: joystick, battery, vacuum, everclear;
+     * missing art 0x141.., collected art 0x1C0.. */
+    ck_text_string(5, 16, "PARTS", CK_TEXT_WHITE);
+    ui_punch(10, 16, 16, 2);
+    for (i = 0; i < UI_PATCH_W; i++)
+        ui_slot((u8)(UI_PATCH_TX + i), 8, 0x8F);
+    ui_slot(6, 8, keen_gp.stuff[0] ? 0x1C0 : 0x141);
+    ui_slot(8, 8, keen_gp.stuff[4] ? 0x1C1 : 0x142);
+    ui_slot(10, 8, keen_gp.stuff[1] ? 0x1C2 : 0x143);
+    ui_slot(12, 8, keen_gp.stuff[2] ? 0x1C3 : 0x144);
 #elif CHOCOLATE_KEEN_CONFIG_SPECIFIC_EPISODE == 2
-    ck_text_string(18, 14, "SAVED", CK_TEXT_WHITE);
+    for (i = 0; i < 4; i++)
+        if (keen_gp.stuff[5 + i])
+            ui_slot((u8)(6 + (i << 1)), 6, (u16)(0x1A8 + i));
+
+    ck_text_string(5, 16, "SAVED", CK_TEXT_WHITE);
     {
         u8 saved = 0;
         for (i = 0; i < 8; i++)
             if (keen_gp.targets[i])
                 saved++;
-        ck_text_char(25, 14, (u8)('0' + saved), CK_TEXT_RED);
-        ck_text_string(26, 14, "/8", CK_TEXT_RED);
+        ck_text_char(12, 16, (u8)('0' + saved), CK_TEXT_RED);
+        ck_text_string(13, 16, "/8", CK_TEXT_RED);
     }
 #else
-    ck_text_string(18, 14, "ANKH", CK_TEXT_WHITE);
+    for (i = 0; i < 4; i++)
+        if (keen_gp.stuff[5 + i])
+            ui_slot((u8)(6 + (i << 1)), 6, (u16)(0xD9 + i));
+
+    /* ankh icon (0xD6, drawn unconditionally like the DOS menu) + time */
+    ck_text_string(5, 16, "ANKH", CK_TEXT_WHITE);
+    ui_punch(12, 16, 2, 2);
+    ui_slot(6, 8, 0xD6);
     ui_dec((u32)(u16)(g_game.keen_invincible / 0x90), num, 4);
-    ck_text_string(24, 14, num, CK_TEXT_RED);
+    ck_text_string(15, 16, num, CK_TEXT_RED);
 #endif
 
+    ui_bg1_refill();
     ck_text_show(1);
     ui_wait_key();
     ck_text_show(0);
     ck_text_clear();
+    ui_patch_close();
 }
+
+/* ---- ep1 ship parts dialog (world map) -------------------------------------
+ * DOS CVort1_worldmap_sprites: standing on the BWB lists the parts still
+ * missing (tiles 0x141..0x144) in a box. Uses the same BG1 overlay
+ * machinery as the status box; caller is the map session (render live). */
+#if CHOCOLATE_KEEN_CONFIG_SPECIFIC_EPISODE == 1
+void ck_ui_ship_parts(void)
+{
+    ck_text_clear();
+    ck_text_box(5, 6, 22, 11, CK_TEXT_WHITE);
+    ck_text_string(7, 8, "YOUR SHIP IS MISSING", CK_TEXT_WHITE);
+    ck_text_string(7, 9, "THESE PARTS:", CK_TEXT_WHITE);
+    ck_text_string(9, 15, "GO GET THEM!", CK_TEXT_RED);
+    ui_punch(10, 12, 16, 2);
+
+    ui_patch_open();
+    {
+        u8 i;
+        for (i = 0; i < UI_PATCH_W; i++)
+            ui_slot((u8)(UI_PATCH_TX + i), 6, 0x8F);
+    }
+    if (!keen_gp.stuff[0])
+        ui_slot(6, 6, 0x141);   /* joystick  */
+    if (!keen_gp.stuff[4])
+        ui_slot(8, 6, 0x142);   /* battery   */
+    if (!keen_gp.stuff[1])
+        ui_slot(10, 6, 0x143);  /* vacuum    */
+    if (!keen_gp.stuff[2])
+        ui_slot(12, 6, 0x144);  /* everclear */
+
+    ui_bg1_refill();
+    ck_text_show(1);
+    ui_wait_key();
+    ck_text_show(0);
+    ck_text_clear();
+    ui_patch_close();
+}
+#endif
 
 /* ---- small dialogs ------------------------------------------------------------ */
 

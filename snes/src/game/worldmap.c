@@ -534,8 +534,10 @@ static u8 CVort1_worldmap_sprites(u16 map_sprite_standing, CkSprite *k)
     u16 tx, ty, tile;
 
     if (map_sprite_standing == 0x14) {
-        /* BWB ship: the "missing parts" dialog is M6 UI; the ep1 win
-         * itself triggers on collecting all four parts (gameflow.c). */
+        /* BWB ship: list the missing parts (the ep1 win itself triggers
+         * on collecting all four parts, gameflow.c). */
+        ck_ui_ship_parts();
+        s_wait_release = 1;
         return 1;
     }
     if ((map_sprite_standing & 0x20) != 0x20)

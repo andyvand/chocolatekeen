@@ -34,6 +34,12 @@ void ck_ui_text_viewer(const char *txt);
  * until closed; gameplay is naturally paused while inside). */
 void ck_ui_status_box(void);
 
+#if CHOCOLATE_KEEN_CONFIG_SPECIFIC_EPISODE == 1
+/* World-map BWB ship dialog: lists the missing ship parts as game
+ * tiles. Call from the map session (render session live). */
+void ck_ui_ship_parts(void);
+#endif
+
 /* Small centered message box; blocks until B/Start. */
 void ck_ui_message(const char *l1, const char *l2);
 
