@@ -58,7 +58,7 @@ CFLAGS  := -g -Wall -Wno-unused-function -Wno-unused-variable \
            -Wno-switch -Wno-implicit-fallthrough -Wno-format \
            -ffunction-sections -fdata-sections \
            -mcpu=arm7tdmi -mtune=arm7tdmi \
-           -Os $(ARCH) -std=gnu99 \
+           -O2 -fno-strict-aliasing $(ARCH) -std=gnu99 \
            -DCHOCOLATE_KEEN_TARGET_GBA=1 \
            -DCHOCOLATE_KEEN_CONFIG_SPECIFIC_EPISODE=$(EPISODE) \
            -DCHOCOLATE_KEEN_IS_EPISODE$(EPISODE)_ENABLED=1 \
