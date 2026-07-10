@@ -342,15 +342,34 @@ void privResetEgaMemStartLocAndPanning(void) {
 		if (engine_screen.sdl.secondarySurface) {
 			SDL_FreeSurface(engine_screen.sdl.secondarySurface);
 		}
+		// Pixel-format details: SDL3 turned SDL_Surface::format into an enum,
+		// so the bit depth and channel masks come from a details lookup rather
+		// than direct struct fields.
+		int ckSurfBpp;
+		Uint32 ckSurfRmask, ckSurfGmask, ckSurfBmask, ckSurfAmask;
+#if SDL_VERSION_ATLEAST(3,0,0)
+		const SDL_PixelFormatDetails *ckSurfFmt = SDL_GetPixelFormatDetails(engine_screen.sdl.windowSurface->format);
+		ckSurfBpp = ckSurfFmt->bits_per_pixel;
+		ckSurfRmask = ckSurfFmt->Rmask;
+		ckSurfGmask = ckSurfFmt->Gmask;
+		ckSurfBmask = ckSurfFmt->Bmask;
+		ckSurfAmask = ckSurfFmt->Amask;
+#else
+		ckSurfBpp = engine_screen.sdl.windowSurface->format->BitsPerPixel;
+		ckSurfRmask = engine_screen.sdl.windowSurface->format->Rmask;
+		ckSurfGmask = engine_screen.sdl.windowSurface->format->Gmask;
+		ckSurfBmask = engine_screen.sdl.windowSurface->format->Bmask;
+		ckSurfAmask = engine_screen.sdl.windowSurface->format->Amask;
+#endif
 		engine_screen.sdl.secondarySurface = SDL_CreateRGBSurfaceFrom(
 		    (uint8_t *)engine_screen.host.egaMemoryPtr+engine_screen.host.bytesPerPixel*(engine_screen.client.currEgaStartAddr+engine_screen.client.currPanning),
 		    engine_screen.dims.clientScanLineLength,
 		    engine_screen.dims.clientRect.h,
-		    engine_screen.sdl.windowSurface->format->BitsPerPixel, engine_screen.host.bytesPerPixel*engine_screen.dims.clientScanLineLength,
-		    engine_screen.sdl.windowSurface->format->Rmask,
-		    engine_screen.sdl.windowSurface->format->Gmask,
-		    engine_screen.sdl.windowSurface->format->Bmask,
-		    engine_screen.sdl.windowSurface->format->Amask
+		    ckSurfBpp, engine_screen.host.bytesPerPixel*engine_screen.dims.clientScanLineLength,
+		    ckSurfRmask,
+		    ckSurfGmask,
+		    ckSurfBmask,
+		    ckSurfAmask
 		);
 	}
 }
@@ -1051,7 +1070,12 @@ void CVort_engine_setWindowTitleAndIcon() {
 		iconSurface = SDL_CreateRGBSurfaceFrom(
 		                           ChocolateKeen_Icon, 32, 32, 8, 32,
 		                           0, 0, 0, 0);
-#if SDL_VERSION_ATLEAST(2,0,0)
+#if SDL_VERSION_ATLEAST(3,0,0)
+		// SDL3: the palette and colour-key mapping are looked up from the
+		// surface rather than reached through the (now enum) format field.
+		SDL_SetPaletteColors(SDL_GetSurfacePalette(iconSurface), ChocolateKeen_Palette, CHOCOLATE_KEEN_PALETTE_START, CHOCOLATE_KEEN_PALETTE_SIZE);
+		SDL_SetColorKey(iconSurface, SDL_TRUE, SDL_MapSurfaceRGB(iconSurface, 0xCC, 0xFF, 0xCC));
+#elif SDL_VERSION_ATLEAST(2,0,0)
 		SDL_SetPaletteColors(iconSurface->format->palette, ChocolateKeen_Palette, CHOCOLATE_KEEN_PALETTE_START, CHOCOLATE_KEEN_PALETTE_SIZE);
 		SDL_SetColorKey(iconSurface, SDL_TRUE, SDL_MapRGB(iconSurface->format, 0xCC, 0xFF, 0xCC));
 #else
@@ -1196,7 +1220,11 @@ void CVort_engine_handleWindowSideChange(void) {
 		engine_screen.sdl.windowSurface = SDL_GetWindowSurface(engine_screen.sdl.window);
 		// Maybe a resized sub-window of some kind is used...
 		if (!engine_arguments.doForceCutFullScreen && engine_gfx_effective_arguments.isFullscreen) {
+#if SDL_VERSION_ATLEAST(3,0,0)
+			SDL_FillRect(engine_screen.sdl.windowSurface, NULL, SDL_MapSurfaceRGB(engine_screen.sdl.windowSurface, 0, 0, 0));
+#else
 			SDL_FillRect(engine_screen.sdl.windowSurface, NULL, SDL_MapRGB(engine_screen.sdl.windowSurface->format, 0, 0, 0));
+#endif
 		}
 		privResetBorderColor();
 	}
@@ -1864,7 +1892,11 @@ bool privCreateHostWindow(void) {
 			return false;
 		}
 #endif
+#if SDL_VERSION_ATLEAST(3,0,0)
+		engine_screen.host.bytesPerPixel = SDL_GetPixelFormatDetails(engine_screen.sdl.windowSurface->format)->bytes_per_pixel;
+#else
 		engine_screen.host.bytesPerPixel = engine_screen.sdl.windowSurface->format->BytesPerPixel;
+#endif
 		// Surface-path secondary buffer is intentionally deferred/not allocated here.
 		break;
 	}
@@ -1948,10 +1980,20 @@ bool privCreateHostWindow(void) {
 #if SDL_VERSION_ATLEAST(2,0,0)
 	case OUTPUTSYS_TEXTURE:
 	{
+#if SDL_VERSION_ATLEAST(3,0,0)
+		// SDL3: pixel formats are described by a const details struct (no
+		// allocate/free), and SDL_MapRGB takes an explicit (NULL) palette.
+		const SDL_PixelFormatDetails *pixFormat = SDL_GetPixelFormatDetails(engine_screen.sdl.textureFormat);
+#else
 		SDL_PixelFormat *pixFormat = SDL_AllocFormat(engine_screen.sdl.textureFormat);
+#endif
 		uint32_t mappedRGBVal;
 		for (colorLoopVar = 0; colorLoopVar < 16; colorLoopVar++) {
+#if SDL_VERSION_ATLEAST(3,0,0)
+			mappedRGBVal = SDL_MapRGB(pixFormat, NULL, engine_egaRGBColorTable[colorLoopVar] >> 16, (engine_egaRGBColorTable[colorLoopVar] >> 8) & 0xFF, engine_egaRGBColorTable[colorLoopVar] & 0xFF);
+#else
 			mappedRGBVal = SDL_MapRGB(pixFormat, engine_egaRGBColorTable[colorLoopVar] >> 16, (engine_egaRGBColorTable[colorLoopVar] >> 8) & 0xFF, engine_egaRGBColorTable[colorLoopVar] & 0xFF);
+#endif
 			switch (engine_screen.host.bytesPerPixel) {
 				case 2:
 					((uint16_t *)engine_screen.host.colorTable)[colorLoopVar] = mappedRGBVal;
@@ -1977,7 +2019,9 @@ bool privCreateHostWindow(void) {
 					}
 			}
 		}
+#if !SDL_VERSION_ATLEAST(3,0,0)
 		SDL_FreeFormat(pixFormat);
+#endif
 		break;
 	}
 #else	// SDL 1.2
@@ -2029,7 +2073,11 @@ bool privCreateHostWindow(void) {
 	{
 		uint32_t mappedRGBVal;
 		for (colorLoopVar = 0; colorLoopVar < 16; colorLoopVar++) {
+#if SDL_VERSION_ATLEAST(3,0,0)
+			mappedRGBVal = SDL_MapSurfaceRGB(engine_screen.sdl.windowSurface, engine_egaRGBColorTable[colorLoopVar] >> 16, (engine_egaRGBColorTable[colorLoopVar] >> 8) & 0xFF, engine_egaRGBColorTable[colorLoopVar] & 0xFF);
+#else
 			mappedRGBVal = SDL_MapRGB(engine_screen.sdl.windowSurface->format, engine_egaRGBColorTable[colorLoopVar] >> 16, (engine_egaRGBColorTable[colorLoopVar] >> 8) & 0xFF, engine_egaRGBColorTable[colorLoopVar] & 0xFF);
+#endif
 			switch (engine_screen.host.bytesPerPixel) {
 				case 2:
 					((uint16_t *)engine_screen.host.colorTable)[colorLoopVar] = mappedRGBVal;
@@ -3521,7 +3569,11 @@ void privResetBorderColor(void) {
 			SDL_FillRect(engine_screen.sdl.windowSurface,
 			             &engine_screen.dims.borderedViewportRect,
 			             //engine_screen.host.colorTable[engine_screen.client.currParsedBorderColor]);
+#if SDL_VERSION_ATLEAST(3,0,0)
+			             SDL_MapSurfaceRGB(engine_screen.sdl.windowSurface,
+#else
 			             SDL_MapRGB(engine_screen.sdl.windowSurface->format,
+#endif
 			                        engine_egaRGBColorTable[engine_screen.client.currParsedBorderColor] >> 16,
 			                        (engine_egaRGBColorTable[engine_screen.client.currParsedBorderColor] >> 8) & 0xFF,
 			                        engine_egaRGBColorTable[engine_screen.client.currParsedBorderColor] & 0xFF

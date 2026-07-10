@@ -537,7 +537,14 @@ void CVort_gui_runLoop(void) {
 	while (1) {
 		while (SDL_PollEvent(&event)) {
 			switch (event.type) {
-#if SDL_VERSION_ATLEAST(2,0,0)
+#if SDL_VERSION_ATLEAST(3,0,0)
+				case SDL_EVENT_WINDOW_RESIZED:
+					CVort_engine_reactToWindowResize(event.window.data1, event.window.data2);
+					break;
+				case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+					CVort_engine_handleWindowSideChange();
+					break;
+#elif SDL_VERSION_ATLEAST(2,0,0)
 				case SDL_WINDOWEVENT:
 					if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
 						CVort_engine_reactToWindowResize(event.window.data1, event.window.data2);

@@ -27,7 +27,14 @@ static bool clear_keys_and_check_for_quit(void) {
     SDL_Event event;
     while (SDL_PollEvent(&event)) { // Clear keys
         switch (event.type) {
-#if SDL_VERSION_ATLEAST(2,0,0)
+#if SDL_VERSION_ATLEAST(3,0,0)
+        case SDL_EVENT_WINDOW_RESIZED:
+        	CVort_engine_reactToWindowResize(event.window.data1, event.window.data2);
+        	break;
+        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+        	CVort_engine_handleWindowSideChange();
+        	break;
+#elif SDL_VERSION_ATLEAST(2,0,0)
         case SDL_WINDOWEVENT:
             if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
                 CVort_engine_reactToWindowResize(event.window.data1, event.window.data2);
@@ -51,7 +58,14 @@ static bool check_for_user_input_and_quit(void) {
     SDL_Event event;
     if (SDL_PollEvent(&event)) {
         switch (event.type) {
-#if SDL_VERSION_ATLEAST(2,0,0)
+#if SDL_VERSION_ATLEAST(3,0,0)
+        case SDL_EVENT_WINDOW_RESIZED:
+        	CVort_engine_reactToWindowResize(event.window.data1, event.window.data2);
+        	break;
+        case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+        	CVort_engine_handleWindowSideChange();
+        	break;
+#elif SDL_VERSION_ATLEAST(2,0,0)
         case SDL_WINDOWEVENT:
             if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
                 CVort_engine_reactToWindowResize(event.window.data1, event.window.data2);

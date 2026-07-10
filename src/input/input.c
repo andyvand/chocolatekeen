@@ -704,7 +704,14 @@ MappedInputEvent_T *CVort_engine_recordNewInputMapping(EmulatedInput_T emuInput,
 	// First ignore "old" key/button and co presses
 	while (SDL_PollEvent(&event)) {
 	        switch (event.type) {
-#if SDL_VERSION_ATLEAST(2,0,0)
+#if SDL_VERSION_ATLEAST(3,0,0)
+		case SDL_EVENT_WINDOW_RESIZED:
+			CVort_engine_reactToWindowResize(event.window.data1, event.window.data2);
+			break;
+		case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+			CVort_engine_handleWindowSideChange();
+			break;
+#elif SDL_VERSION_ATLEAST(2,0,0)
 		case SDL_WINDOWEVENT:
 			if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
 				CVort_engine_reactToWindowResize(event.window.data1, event.window.data2);
@@ -729,7 +736,14 @@ MappedInputEvent_T *CVort_engine_recordNewInputMapping(EmulatedInput_T emuInput,
 	while (doWait && (SDL_GetTicks() - currTime < mstimeout)) {
 		while (SDL_PollEvent(&event)) {
 		        switch (event.type) {
-#if SDL_VERSION_ATLEAST(2,0,0)
+#if SDL_VERSION_ATLEAST(3,0,0)
+			case SDL_EVENT_WINDOW_RESIZED:
+				CVort_engine_reactToWindowResize(event.window.data1, event.window.data2);
+				break;
+			case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+				CVort_engine_handleWindowSideChange();
+				break;
+#elif SDL_VERSION_ATLEAST(2,0,0)
 			case SDL_WINDOWEVENT:
 				if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
 					CVort_engine_reactToWindowResize(event.window.data1, event.window.data2);
@@ -744,9 +758,17 @@ MappedInputEvent_T *CVort_engine_recordNewInputMapping(EmulatedInput_T emuInput,
 #endif
 			case SDL_KEYDOWN:
 #if SDL_VERSION_ATLEAST(2,0,0)
+#if SDL_VERSION_ATLEAST(3,0,0)
+				inputVal = event.key.scancode;
+#else
 				inputVal = event.key.keysym.scancode;
+#endif
+#else
+#if SDL_VERSION_ATLEAST(3,0,0)
+				inputVal = event.key.key;
 #else
 				inputVal = event.key.keysym.sym;
+#endif
 #endif
 				inputEventList = &engine_inputMappings.keyMappings[inputVal];
 				inputT = HOSTINPUT_KEYPRESS;
@@ -1671,7 +1693,14 @@ void CVort_engine_updateInputStatus() {
     // First we handle events as usual
     while (SDL_PollEvent(&event)) {
         switch (event.type) {
-#if SDL_VERSION_ATLEAST(2,0,0)
+#if SDL_VERSION_ATLEAST(3,0,0)
+            case SDL_EVENT_WINDOW_RESIZED:
+            	CVort_engine_reactToWindowResize(event.window.data1, event.window.data2);
+            	break;
+            case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
+            	CVort_engine_handleWindowSideChange();
+            	break;
+#elif SDL_VERSION_ATLEAST(2,0,0)
             case SDL_WINDOWEVENT:
                 if (event.window.event == SDL_WINDOWEVENT_RESIZED) {
                     CVort_engine_reactToWindowResize(event.window.data1, event.window.data2);
@@ -1687,9 +1716,17 @@ void CVort_engine_updateInputStatus() {
             case SDL_KEYDOWN:
             case SDL_KEYUP:
 #if SDL_VERSION_ATLEAST(2,0,0)
+#if SDL_VERSION_ATLEAST(3,0,0)
+                currSDLKeyId = event.key.scancode;
+#else
                 currSDLKeyId = event.key.keysym.scancode;
+#endif
+#else
+#if SDL_VERSION_ATLEAST(3,0,0)
+                currSDLKeyId = event.key.key;
 #else
                 currSDLKeyId = event.key.keysym.sym;
+#endif
 #endif
                 if (currSDLKeyId >= sizeof(engine_inputMappings.keyMappings)/sizeof(MappedInputEventList_T))
                     break; // If we don't break, a BUFFER OVERFLOW is possible!

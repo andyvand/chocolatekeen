@@ -58,6 +58,27 @@ For Linux builds you'll need a C compiler (e.g. gcc) and toolchain. The setup va
 3. Navigate to `/build/linux`
 4. Run `./build_linux.sh`
 
+### SDL3
+The engine targets the SDL2 API, but it can also be built against SDL3 through a
+compatibility shim. This is additive: the SDL2 (and legacy SDL 1.2) build paths
+are untouched. The shim lives in [src/platform/sdl3_compat.h](src/platform/sdl3_compat.c)
+(with wrappers in `src/platform/sdl3_compat.c`); it enables SDL3's built-in
+`SDL_ENABLE_OLD_NAMES` aliases and adds glue for the APIs SDL3 removed or
+reshaped (the push-callback audio model, `SDL_RendererInfo`, float render rects,
+display-mode enumeration, and so on).
+
+Prerequisites:
+1. SDL3 development files discoverable via `pkg-config` (the `sdl3` module). On
+   macOS/Linux this is typically the `sdl3` package from your package manager or
+   a source build with `pkg-config` set up.
+
+Build steps:
+1. Navigate to `/build/sdl3`.
+2. Run `./build_sdl3.sh -j4`.
+
+This produces a `chocolate-keen` executable linked against SDL3. Override the
+pkg-config binary for cross builds with `make SDL3_PKG_CONFIG=...`.
+
 ### WebAssembly
 To build for WebAssembly, you'll need the <a href="https://github.com/emscripten-core/emsdk" target="_blank">Emscripten SDK</a>. Find setup instructions <a href="https://emscripten.org/docs/getting_started/downloads.html" target="_blank">here</a>
 

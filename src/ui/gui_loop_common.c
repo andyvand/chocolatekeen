@@ -52,7 +52,11 @@ GUI_NavButton_T CVort_gui_getNavButtonMouseReleaseAction(
 
 GUI_KeyNavAction_T CVort_gui_handleKeydownAsNavigation(const SDL_KeyboardEvent *keyEvent, const GUI_KeyNavHandlers_T *handlers) {
 #if SDL_VERSION_ATLEAST(2,0,0)
+#if SDL_VERSION_ATLEAST(3,0,0)
+	switch (keyEvent->scancode) {
+#else
 	switch (keyEvent->keysym.scancode) {
+#endif
 		case SDL_SCANCODE_ESCAPE:
 			if (handlers->back) handlers->back();
 			return GUI_KEY_NAV_BACK;
@@ -81,7 +85,11 @@ GUI_KeyNavAction_T CVort_gui_handleKeydownAsNavigation(const SDL_KeyboardEvent *
 			return GUI_KEY_NAV_NONE;
 	}
 #else
+#if SDL_VERSION_ATLEAST(3,0,0)
+	switch (keyEvent->key) {
+#else
 	switch (keyEvent->keysym.sym) {
+#endif
 		case SDLK_ESCAPE:
 			if (handlers->back) handlers->back();
 			return GUI_KEY_NAV_BACK;
